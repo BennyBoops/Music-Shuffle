@@ -1,0 +1,38 @@
+{
+	"schemaVersion": 1,
+	"id": "music-shuffle",
+	"version": "${version}",
+	"name": "Music Shuffle",
+	"description": "Shuffles ALL Minecraft songs during gameplay.",
+	"authors": [
+		"BennyBoops"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "MIT",
+	"icon": "assets/musicshuffle/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.bennyboops.musicshuffle.MusicShuffle"
+		],
+		"client": [
+			"com.bennyboops.musicshuffle.client.MusicShuffleClient"
+		]
+	},
+	"mixins": [
+		"music-shuffle.mixins.json",
+		{
+			"config": "music-shuffle.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~26.1.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

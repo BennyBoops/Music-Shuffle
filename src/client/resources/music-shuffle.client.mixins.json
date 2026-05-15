@@ -1,0 +1,14 @@
+{
+	"required": true,
+	"package": "com.bennyboops.musicshuffle.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"OptionsScreenMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
