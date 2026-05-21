@@ -8,8 +8,8 @@
 		"BennyBoops"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://modrinth.com/mod/music-shuffle",
+		"sources": "https://github.com/BennyBoops/Music-Shuffle"
 	},
 	"license": "MIT",
 	"icon": "assets/musicshuffle/icon.png",
@@ -20,7 +20,8 @@
 		],
 		"client": [
 			"com.bennyboops.musicshuffle.client.MusicShuffleClient"
-		]
+		],
+		"modmenu": ["com.bennyboops.musicshuffle.client.MusicShuffleModMenu"]
 	},
 	"mixins": [
 		"music-shuffle.mixins.json",

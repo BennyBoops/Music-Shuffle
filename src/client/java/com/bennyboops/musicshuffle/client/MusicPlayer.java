@@ -31,7 +31,6 @@ public class MusicPlayer {
     private final AtomicBoolean reshuffleRequested = new AtomicBoolean(false);
 
     private volatile boolean queueLocked = false;
-
     private volatile boolean queueCleared = false;
 
     private volatile float masterVolume = 1.0f;
@@ -60,6 +59,9 @@ public class MusicPlayer {
 
     private final List<File> pendingAlbumQueue = new ArrayList<>();
     private final Set<String> blacklist = new HashSet<>();
+
+    private java.util.function.Supplier<List<File>> trackSupplier = null;
+
 
     public MusicPlayer(File musicFolder) {
         this.musicFolder = musicFolder;
@@ -229,7 +231,7 @@ public class MusicPlayer {
 
         LOGGER.info("[MusicShuffle] Reshuffling queue.");
 
-        List<File> freshTracks = scanTracks();
+        List<File> freshTracks = getNextQueueTracks();
         if (freshTracks.isEmpty()) return;
 
         String currentPath = lastPlayedPath;
@@ -245,6 +247,9 @@ public class MusicPlayer {
 
         pendingReshuffledQueue = reshuffled;
 
+        queueNextTracks.clear();
+        reorderRequests.clear();
+
         List<String> snap = new ArrayList<>();
         for (File f : reshuffled) {
             snap.add(stripExtension(f.getName()));
@@ -259,13 +264,47 @@ public class MusicPlayer {
         }
     }
 
+    public void reshuffleForDimension(List<File> dimensionTracks, boolean skipCurrent) {
+        if (!running.get()) return;
+
+        LOGGER.info("[MusicShuffle] Reshuffling for dimension ({} track(s), skip={}).",
+                dimensionTracks.size(), skipCurrent);
+
+        queueLocked  = false;
+        queueCleared = false;
+
+        List<File> reshuffled = new ArrayList<>(dimensionTracks);
+        shuffleAvoidingLastPlayed(reshuffled);
+
+        pendingReshuffledQueue = reshuffled;
+
+        queueNextTracks.clear();
+        reorderRequests.clear();
+
+        List<String> snap = new ArrayList<>();
+        for (File f : reshuffled) {
+            snap.add(stripExtension(f.getName()));
+        }
+        queueSnapshot = Collections.unmodifiableList(snap);
+
+        reshuffleRequested.set(true);
+
+        paused.set(false);
+        synchronized (paused) { paused.notifyAll(); }
+
+        if (skipCurrent) {
+            skipRequested.set(true);
+            interruptCurrentLine();
+        }
+    }
+
     public LoopMode getLoopMode() {
         return loopMode;
     }
 
     public void cycleLoopMode() {
         switch (loopMode) {
-            case OFF -> loopMode = LoopMode.QUEUE;
+            case OFF   -> loopMode = LoopMode.QUEUE;
             case QUEUE -> loopMode = LoopMode.TRACK;
             case TRACK -> loopMode = LoopMode.OFF;
         }
@@ -334,6 +373,10 @@ public class MusicPlayer {
         this.blacklist.addAll(blacklist);
     }
 
+    public void setTrackSupplier(java.util.function.Supplier<List<File>> supplier) {
+        this.trackSupplier = supplier;
+    }
+
     public Set<String> getBlacklist() {
         return Collections.unmodifiableSet(blacklist);
     }
@@ -347,7 +390,7 @@ public class MusicPlayer {
 
     public long getCurrentFrame() { return currentFrame; }
 
-    public long getTotalFrames() { return totalFrames; }
+    public long getTotalFrames()  { return totalFrames; }
 
     public void setVolume(float volume) {
         masterVolume = Math.max(0f, Math.min(1f, volume));
@@ -388,15 +431,21 @@ public class MusicPlayer {
             if (reshuffleRequested.get()) {
                 reshuffleRequested.set(false);
 
-                queueNextTracks.clear();
+                List<File> preservedNext = new ArrayList<>();
+                File peeked;
+                while ((peeked = queueNextTracks.poll()) != null) preservedNext.add(peeked);
+
                 reorderRequests.clear();
 
                 if (pendingReshuffledQueue != null && !pendingReshuffledQueue.isEmpty()) {
                     queue = new ArrayList<>(pendingReshuffledQueue);
                     pendingReshuffledQueue = null;
                     index = 0;
-
                     LOGGER.info("[MusicShuffle] Queue reshuffled with {} upcoming track(s).", queue.size());
+                }
+
+                for (int i = preservedNext.size() - 1; i >= 0; i--) {
+                    queueNextTracks.offer(preservedNext.get(i));
                 }
 
                 publishQueueSnapshot(queue, index);
@@ -449,13 +498,15 @@ public class MusicPlayer {
             if (next == null && jumpToTrack != null) {
                 next = jumpToTrack;
                 jumpToTrack = null;
-                nextFromQueue = false;
+                nextFromQueue = true;
                 skipRequested.set(false);
 
                 if (!playedThisCycle.contains(next.getAbsolutePath())) {
                     queue.remove(next);
                     if (index > queue.size()) index = queue.size();
                 }
+                queue.add(index, next);
+                index++;
                 publishQueueSnapshot(queue, index);
             }
 
@@ -478,7 +529,7 @@ public class MusicPlayer {
                     }
 
                     if (queueLocked && loopMode == LoopMode.OFF && skipRequested.get()) {
-                        List<File> freshTracks = scanTracks();
+                        List<File> freshTracks = getNextQueueTracks();
                         if (!freshTracks.isEmpty()) {
                             queue = new ArrayList<>(freshTracks);
                             shuffleAvoidingLastPlayed(queue);
@@ -514,7 +565,7 @@ public class MusicPlayer {
                         continue;
                     }
 
-                    List<File> freshTracks = scanTracks();
+                    List<File> freshTracks = getNextQueueTracks();
                     if (freshTracks.isEmpty()) {
                         LOGGER.info("[MusicShuffle] Music folder empty — stopping.");
                         break;
@@ -545,6 +596,7 @@ public class MusicPlayer {
             savedIndex = index;
 
             Thread.interrupted();
+
             playTrack(next);
 
             if (loopMode == LoopMode.TRACK
@@ -556,7 +608,12 @@ public class MusicPlayer {
             }
 
             if (!stopRequested.get() && jumpToTrack == null) {
-                trySleep(500);
+                long delayMin = MusicShuffleClient.trackDelayMinMs;
+                long delayMax = MusicShuffleClient.trackDelayMaxMs;
+                if (delayMax < delayMin) delayMax = delayMin;
+                long extra = delayMin == delayMax ? delayMin
+                        : delayMin + (long)(Math.random() * (delayMax - delayMin + 1));
+                trySleep(500 + extra);
             }
         }
 
@@ -591,11 +648,8 @@ public class MusicPlayer {
             currentFrame = 0;
             long reportedFrames = rawStream.getFrameLength();
             if (reportedFrames > 0) {
-                // WAV (and other formats that report length upfront)
                 totalFrames = reportedFrames;
             } else {
-                // OGG and other compressed formats return -1 from getFrameLength().
-                // Do a silent pre-scan: decode into PCM and count the frames.
                 totalFrames = countPcmFrames(file, pcmFormat);
             }
 
@@ -702,6 +756,14 @@ public class MusicPlayer {
             line.close();
         }
         if (playbackThread != null) playbackThread.interrupt();
+    }
+
+    private List<File> getNextQueueTracks() {
+        if (trackSupplier != null) {
+            List<File> supplied = trackSupplier.get();
+            if (supplied != null && !supplied.isEmpty()) return supplied;
+        }
+        return scanTracks();
     }
 
     private List<File> scanTracks() {

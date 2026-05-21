@@ -138,21 +138,15 @@ public class TrackConfigScreen extends Screen {
         );
 
         addRenderableWidget(Button.builder(
-                        toastToggleLabel(),
+                        Component.literal("☰ Config"),
                         btn -> {
-                            MusicShuffleClient.toastsEnabled = !MusicShuffleClient.toastsEnabled;
-                            btn.setMessage(toastToggleLabel());
+                            if (minecraft != null)
+                                minecraft.setScreen(new ModConfigScreen(this));
                         })
                 .bounds(width / 2 + 104, height - 26, 60, 20)
-                .tooltip(Tooltip.create(Component.literal("Toggles the now-playing banner")))
+                .tooltip(Tooltip.create(Component.literal("Open Music Shuffle config")))
                 .build()
         );
-    }
-
-    private Component toastToggleLabel() {
-        return MusicShuffleClient.toastsEnabled
-                ? Component.literal("Toast: On").withStyle(s -> s.withColor(0x55FF55))
-                : Component.literal("Toast: Off").withStyle(s -> s.withColor(0xFF5555));
     }
 
     @Override
@@ -212,6 +206,7 @@ public class TrackConfigScreen extends Screen {
                 int colour = albumColour("Unsorted");
                 List<TrackEntry> entries = new ArrayList<>();
                 for (File f : rootTracks) {
+                    TrackDimensionConfig.get().seedIfAbsent(f.getName());
                     TrackEntry te = new TrackEntry(f.getName(), f, colour);
                     entries.add(te);
                     allEntries.add(te);
@@ -234,6 +229,7 @@ public class TrackConfigScreen extends Screen {
                 int colour = albumColour(folder.getName());
                 List<TrackEntry> entries = new ArrayList<>();
                 for (File f : tracks) {
+                    TrackDimensionConfig.get().seedIfAbsent(f.getName());
                     entries.add(new TrackEntry(f.getName(), f, colour));
                 }
                 allEntries.add(new CategoryEntry(folder.getName(), entries, colour));
@@ -242,6 +238,7 @@ public class TrackConfigScreen extends Screen {
 
             populateTrackColours();
             filter(lastFilter == null ? "" : lastFilter);
+            TrackDimensionConfig.get().save();
         }
 
         @Override
@@ -436,6 +433,12 @@ public class TrackConfigScreen extends Screen {
             private final Button queueNextBtn;
             private final Button toggleBtn;
 
+            private final Button overworldBtn;
+            private final Button netherBtn;
+            private final Button endBtn;
+
+            private static final int DIM_GROUP_GAP = 12;
+
             TrackEntry(String fileName, File file, int colour) {
                 this.fileName = fileName;
                 this.file     = file;
@@ -455,6 +458,19 @@ public class TrackConfigScreen extends Screen {
                         .bounds(0, 0, SMALL_BTN_W, BTN_H)
                         .tooltip(Tooltip.create(Component.literal("Include In Shuffle")))
                         .build();
+
+                overworldBtn = Button.builder(Component.literal(""), btn -> {})
+                        .bounds(0, 0, SMALL_BTN_W, BTN_H)
+                        .tooltip(Tooltip.create(Component.literal("Overworld")))
+                        .build();
+                netherBtn = Button.builder(Component.literal(""), btn -> {})
+                        .bounds(0, 0, SMALL_BTN_W, BTN_H)
+                        .tooltip(Tooltip.create(Component.literal("Nether")))
+                        .build();
+                endBtn = Button.builder(Component.literal(""), btn -> {})
+                        .bounds(0, 0, SMALL_BTN_W, BTN_H)
+                        .tooltip(Tooltip.create(Component.literal("The End")))
+                        .build();
             }
 
             private boolean isEnabled() {
@@ -471,6 +487,16 @@ public class TrackConfigScreen extends Screen {
 
             private int playBtnX(int rowLeft, int rowWidth) {
                 return queueNextBtnX(rowLeft, rowWidth) - BTN_GAP - SMALL_BTN_W;
+            }
+
+            private int endBtnX(int rowLeft, int rowWidth) {
+                return playBtnX(rowLeft, rowWidth) - DIM_GROUP_GAP - SMALL_BTN_W;
+            }
+            private int netherBtnX(int rowLeft, int rowWidth) {
+                return endBtnX(rowLeft, rowWidth) - BTN_GAP - SMALL_BTN_W;
+            }
+            private int overworldBtnX(int rowLeft, int rowWidth) {
+                return netherBtnX(rowLeft, rowWidth) - BTN_GAP - SMALL_BTN_W;
             }
 
             @Override
@@ -523,6 +549,32 @@ public class TrackConfigScreen extends Screen {
                 toggleBtn.setX(toggleX);
                 toggleBtn.setY(btnY);
                 toggleBtn.extractRenderState(graphics, mouseX, mouseY, delta);
+
+                // Only show dim buttons when dimension shuffle is enabled
+                if (MusicShuffleClient.dimensionShuffleEnabled) {
+                    TrackDimensionConfig tdc = TrackDimensionConfig.get();
+
+                    overworldBtn.setMessage(tdc.isAllowedIn(fileName, TrackDimensionConfig.OVERWORLD)
+                            ? Component.literal("☒").withStyle(s -> s.withColor(0x55FF55))   // green checked
+                            : Component.literal("☐").withStyle(s -> s.withColor(0x55FF55))); // green unchecked
+                    overworldBtn.setX(overworldBtnX(absoluteX, rowWidth));
+                    overworldBtn.setY(btnY);
+                    overworldBtn.extractRenderState(graphics, mouseX, mouseY, delta);
+
+                    netherBtn.setMessage(tdc.isAllowedIn(fileName, TrackDimensionConfig.NETHER)
+                            ? Component.literal("☒").withStyle(s -> s.withColor(0xFF5555))
+                            : Component.literal("☐").withStyle(s -> s.withColor(0xFF5555)));
+                    netherBtn.setX(netherBtnX(absoluteX, rowWidth));
+                    netherBtn.setY(btnY);
+                    netherBtn.extractRenderState(graphics, mouseX, mouseY, delta);
+
+                    endBtn.setMessage(tdc.isAllowedIn(fileName, TrackDimensionConfig.END)
+                            ? Component.literal("☒").withStyle(s -> s.withColor(0xAA00AA))
+                            : Component.literal("☐").withStyle(s -> s.withColor(0xAA00AA)));
+                    endBtn.setX(endBtnX(absoluteX, rowWidth));
+                    endBtn.setY(btnY);
+                    endBtn.extractRenderState(graphics, mouseX, mouseY, delta);
+                }
             }
 
             @Override
@@ -534,6 +586,27 @@ public class TrackConfigScreen extends Screen {
 
                 double mx = event.x();
                 double my = event.y();
+
+                if (MusicShuffleClient.dimensionShuffleEnabled) {
+                    int overworldX = overworldBtnX(absoluteX, rowWidth);
+                    if (mx >= overworldX && mx <= overworldX + SMALL_BTN_W && my >= btnY && my <= btnY + BTN_H) {
+                        TrackDimensionConfig.get().toggle(fileName, TrackDimensionConfig.OVERWORLD);
+                        playClick();
+                        return true;
+                    }
+                    int netherX = netherBtnX(absoluteX, rowWidth);
+                    if (mx >= netherX && mx <= netherX + SMALL_BTN_W && my >= btnY && my <= btnY + BTN_H) {
+                        TrackDimensionConfig.get().toggle(fileName, TrackDimensionConfig.NETHER);
+                        playClick();
+                        return true;
+                    }
+                    int endX = endBtnX(absoluteX, rowWidth);
+                    if (mx >= endX && mx <= endX + SMALL_BTN_W && my >= btnY && my <= btnY + BTN_H) {
+                        TrackDimensionConfig.get().toggle(fileName, TrackDimensionConfig.END);
+                        playClick();
+                        return true;
+                    }
+                }
 
                 // Toggle button
                 int toggleX = toggleBtnX(absoluteX, rowWidth);

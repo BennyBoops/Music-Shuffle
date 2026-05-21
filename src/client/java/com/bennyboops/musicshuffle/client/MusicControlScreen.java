@@ -126,9 +126,22 @@ public class MusicControlScreen extends Screen {
         addRenderableWidget(Button.builder(
                         Component.literal("⇄"),
                         btn -> {
-                            MusicShuffleClient.musicPlayer.reshuffle();
-                            if (minecraft != null)
-                                MusicShuffleClient.showNowPlayingToast(minecraft, "Queue Shuffled");
+                            if (MusicShuffleClient.dimensionShuffleEnabled
+                                    && minecraft != null && minecraft.level != null) {
+                                String dimId = minecraft.level.dimension().identifier().toString();
+                                List<java.io.File> tracks =
+                                        TrackDimensionConfig.get().getTracksForDimension(
+                                                dimId,
+                                                MusicShuffleClient.musicFolder,
+                                                MusicShuffleClient.musicPlayer.getBlacklist());
+                                if (!tracks.isEmpty()) {
+                                    MusicShuffleClient.musicPlayer.reshuffleForDimension(tracks, false);
+                                }
+                            } else {
+                                MusicShuffleClient.musicPlayer.reshuffle();
+                            }
+//                            if (minecraft != null)
+//                                MusicShuffleClient.showNowPlayingToast(minecraft, "Queue Shuffled");
                         })
                 .bounds(btnRowX + (BTN_W + BTN_GAP) * 2, row2Y, BTN_W, BTN_H)
                 .tooltip(Tooltip.create(Component.literal("Shuffle")))

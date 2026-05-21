@@ -7,14 +7,12 @@ import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.loader.api.FabricLoader;
 
-
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundSource;
-
 import net.minecraft.util.Util;
 import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
@@ -26,6 +24,8 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.*;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.nio.file.FileSystemAlreadyExistsException;
 
@@ -53,23 +53,36 @@ public class MusicShuffleClient implements ClientModInitializer {
 
 	private static String lastToastTrack = "";
 
+	public enum ToastMode { OFF, BANNER, SMALL }
+
 	public static boolean modEnabled = true;
-	public static boolean toastsEnabled = true;
+	public static ToastMode toastMode = ToastMode.BANNER;
 
 	public static volatile boolean startupComplete = false;
 
-	private static volatile String nowPlayingHudText = "";
-	private static volatile long nowPlayingHudUntilMs = 0L;
-	private static long nowPlayingHudStartMs = 0L;
-	private static final long HOLD_MS = 5000L;
+	public static long    toastDisplayMs   = 5000L;
+	public static volatile long trackDelayMinMs = 0L;
+	public static volatile long trackDelayMaxMs = 0L;
+	public static volatile boolean dimensionShuffleEnabled = false;
+
+	public static volatile boolean skipOnDimensionChange = false;
+
+	private static volatile String lastDimensionId = null;
+
+	private static volatile String nowPlayingHudText  = "";
+	private static long            nowPlayingHudStartMs = 0L;
 	private static final long FADE_MS = 1500L;
-	private static final int SLIDE_OFFSET = 60;
+	private static volatile long   smallToastUntilMs = 0L;
+	private static volatile String smallToastText    = "";
 
 	@Override
 	public void onInitializeClient() {
 		musicFolder = new File(FabricLoader.getInstance().getGameDir().toFile(), MOD_ID);
 		ensureMusicFolder();
 		extractBundledSongs();
+		ModConfig.get().load();
+		TrackDimensionConfig.get().load();
+
 		HudElementRegistry.attachElementBefore(
 				VanillaHudElements.CHAT,
 				Identifier.fromNamespaceAndPath(MOD_ID, "now_playing_hud"),
@@ -77,6 +90,17 @@ public class MusicShuffleClient implements ClientModInitializer {
 		);
 
 		musicPlayer = new MusicPlayer(musicFolder);
+
+		musicPlayer.setTrackSupplier(() -> {
+			Minecraft mc = Minecraft.getInstance();
+			if (dimensionShuffleEnabled && mc != null && mc.level != null) {
+				String dimId = mc.level.dimension().identifier().toString();
+				List<java.io.File> tracks = TrackDimensionConfig.get().getTracksForDimension(
+						dimId, musicFolder, musicPlayer.getBlacklist());
+				if (!tracks.isEmpty()) return tracks;
+			}
+			return scanAllTracks(musicFolder, musicPlayer.getBlacklist());
+		});
 
 		Thread startupThread = new Thread(() -> {
 			try {
@@ -139,8 +163,16 @@ public class MusicShuffleClient implements ClientModInitializer {
 			musicPlayer.skip();
 		}
 		while (shuffleKey.consumeClick()) {
-			musicPlayer.reshuffle();
-			showNowPlayingToast(client, "Queue Shuffled");
+			if (dimensionShuffleEnabled && client.level != null) {
+				String dimId = client.level.dimension().identifier().toString();
+				List<java.io.File> tracks = TrackDimensionConfig.get().getTracksForDimension(
+						dimId, musicFolder, musicPlayer.getBlacklist());
+				if (!tracks.isEmpty()) {
+					musicPlayer.reshuffleForDimension(tracks, false);
+				}
+			} else {
+				musicPlayer.reshuffle();
+			}
 		}
 
 		if (!modEnabled) {
@@ -156,6 +188,21 @@ public class MusicShuffleClient implements ClientModInitializer {
 
 		if (!musicPlayer.isRunning() && startupComplete) musicPlayer.resume();
 
+		if (startupComplete && dimensionShuffleEnabled && client.level != null) {
+			String currentDimId = client.level.dimension().identifier().toString();
+
+			if (lastDimensionId == null) {
+				lastDimensionId = currentDimId;
+				applyDimensionShuffle(client, currentDimId, false);
+			} else if (!currentDimId.equals(lastDimensionId)) {
+				LOGGER.info("[MusicShuffle] Dimension changed: {} → {}", lastDimensionId, currentDimId);
+				lastDimensionId = currentDimId;
+				applyDimensionShuffle(client, currentDimId, skipOnDimensionChange);
+			}
+		} else if (client.level == null) {
+			lastDimensionId = null;
+		}
+
 		String track = musicPlayer.getCurrentTrackName();
 		if (!track.isEmpty() && !track.equals(lastToastTrack) && !musicPlayer.isPaused()) {
 			lastToastTrack = track;
@@ -163,67 +210,118 @@ public class MusicShuffleClient implements ClientModInitializer {
 		}
 	}
 
-	private static int nowPlayingHudColor = 0x555555;
+	static List<java.io.File> scanAllTracks(java.io.File folder, Set<String> blacklist) {
+		List<java.io.File> found = new java.util.ArrayList<>();
+		scanAllTracksRecursive(folder, blacklist, found);
+		return found;
+	}
+
+	private static void scanAllTracksRecursive(java.io.File folder, Set<String> blacklist,
+											   List<java.io.File> found) {
+		java.io.File[] files = folder.listFiles();
+		if (files == null) return;
+		for (java.io.File f : files) {
+			if (f.isDirectory()) scanAllTracksRecursive(f, blacklist, found);
+			else if (f.isFile() && !blacklist.contains(f.getName())) {
+				String lower = f.getName().toLowerCase();
+				if (lower.endsWith(".wav") || lower.endsWith(".ogg")) found.add(f);
+			}
+		}
+	}
+
+	/**
+	 * Applies dimension-specific shuffle by rebuilding the queue with only
+	 * tracks that are mapped to the given dimension.
+	 *
+	 * @param client      The Minecraft client instance (used for toast notifications).
+	 * @param dimensionId The resource-location string of the new dimension.
+	 * @param skipCurrent If true, the currently-playing track is interrupted immediately.
+	 */
+	private static void applyDimensionShuffle(Minecraft client, String dimensionId, boolean skipCurrent) {
+		TrackDimensionConfig dimCfg = TrackDimensionConfig.get();
+
+		List<java.io.File> tracks = TrackDimensionConfig.get().getTracksForDimension(
+				dimensionId, musicFolder, musicPlayer.getBlacklist());
+
+		if (tracks.isEmpty()) {
+			LOGGER.warn("[MusicShuffle] No tracks found for dimension '{}' — keeping current queue.", dimensionId);
+			return;
+		}
+
+		LOGGER.info("[MusicShuffle] Applying dimension shuffle for '{}' ({} track(s)).",
+				dimensionId, tracks.size());
+
+		musicPlayer.reshuffleForDimension(tracks, skipCurrent);
+
+	}
+
 
 	static void showNowPlayingToast(Minecraft client, String trackName) {
-		if (!toastsEnabled) return;
-		nowPlayingHudText = "♫ " + trackName;
-		nowPlayingHudStartMs = Util.getMillis();
+		if (toastMode == ToastMode.OFF) return;
+		String text = "♫ " + trackName;
+		if (toastMode == ToastMode.SMALL) {
+			smallToastText    = text;
+			smallToastUntilMs = Util.getMillis() + toastDisplayMs;
+		} else {
+			nowPlayingHudText    = text;
+			nowPlayingHudStartMs = Util.getMillis();
+		}
 	}
 
 	private static void renderNowPlayingHud(GuiGraphicsExtractor graphics) {
-		if (nowPlayingHudText.isEmpty()) return;
-
 		Minecraft mc = Minecraft.getInstance();
 		if (mc == null || mc.font == null || mc.getWindow() == null) return;
 
-		final long HOLD_MS = 5000L;
-		final long FADE_MS = 1500L;
-		final int SLIDE_OFFSET = 60;
-		final int X_BASE_OFFSET = 8;
+		if (toastMode == ToastMode.SMALL) {
+			if (!smallToastText.isEmpty()) {
+				if (Util.getMillis() < smallToastUntilMs) {
+					renderSmallHud(graphics, mc);
+				} else {
+					smallToastText = "";
+				}
+			}
+			return;
+		}
 
-		long now = Util.getMillis();
+		if (nowPlayingHudText.isEmpty()) return;
+		if (toastMode != ToastMode.BANNER) return;
+
+		long  now     = Util.getMillis();
 		float elapsed = now - nowPlayingHudStartMs;
 
 		float alphaFactor;
 		float slideT;
 
-		//SLIDE IN
 		if (elapsed <= FADE_MS) {
 			float t = elapsed / FADE_MS;
-
 			if (t < 0f) t = 0f;
 			if (t > 1f) t = 1f;
-
 			t = t * t * (3f - 2f * t);
-
 			slideT = 1f - t;
 			alphaFactor = t;
-		}
-		//HOLD
-		else if (elapsed <= HOLD_MS + FADE_MS) {
+		} else if (elapsed <= toastDisplayMs + FADE_MS) {
 			slideT = 0f;
 			alphaFactor = 1f;
-		}
-		//SLIDE OUT
-		else {
-			float t = (elapsed - HOLD_MS - FADE_MS) / FADE_MS;
-
+		} else {
+			float t = (elapsed - toastDisplayMs - FADE_MS) / FADE_MS;
 			if (t < 0f) t = 0f;
 			if (t > 1f) t = 1f;
-
 			t = t * t * (3f - 2f * t);
-
 			slideT = t;
 			alphaFactor = 1f - t;
 		}
 
-		int alpha = (int)(alphaFactor * 255f);
-
-		if (elapsed >= HOLD_MS + (FADE_MS * 2) + 50f) {
+		if (elapsed >= toastDisplayMs + (FADE_MS * 2) + 50f) {
 			nowPlayingHudText = "";
 			return;
 		}
+
+		renderBannerHud(graphics, mc, (int)(alphaFactor * 255f), slideT);
+	}
+
+	private static void renderBannerHud(GuiGraphicsExtractor graphics, Minecraft mc, int alpha, float slideT) {
+		final int SLIDE_OFFSET  = 60;
+		final int X_BASE_OFFSET = 8;
 
 		String name = MusicShuffleClient.musicPlayer != null
 				? MusicShuffleClient.musicPlayer.getCurrentTrackName()
@@ -235,53 +333,56 @@ public class MusicShuffleClient implements ClientModInitializer {
 		);
 
 		float desat = 0.65f;
-
-		int r = (songColorRGB >> 16) & 0xFF;
-		int g = (songColorRGB >> 8) & 0xFF;
-		int b = songColorRGB & 0xFF;
-
+		int r    = (songColorRGB >> 16) & 0xFF;
+		int g    = (songColorRGB >> 8)  & 0xFF;
+		int b    =  songColorRGB        & 0xFF;
 		int gray = (r + g + b) / 3;
-
 		r = (int)(gray + (r - gray) * desat);
 		g = (int)(gray + (g - gray) * desat);
 		b = (int)(gray + (b - gray) * desat);
-
 		int desatColor = (r << 16) | (g << 8) | b;
 
-		int bg = ((int)(alpha * 0.65f) << 24) | (desatColor & 0x00FFFFFF);
-
-		int border = (alpha << 24) | 0x888888;
+		int bg        = ((int)(alpha * 0.65f) << 24) | (desatColor & 0x00FFFFFF);
+		int border    = (alpha << 24) | 0x888888;
 		int textColor = (alpha << 24) | 0xFFFFFF;
 
 		int textW = mc.font.width(Component.literal(nowPlayingHudText).withStyle(s -> s.withBold(true)));
 		int textH = mc.font.lineHeight;
-
-		int pad = 8;
-		int y = 8;
-
+		int pad   = 8;
+		int y     = 8;
 		int baseX = X_BASE_OFFSET;
-		int x = baseX + (int)(-SLIDE_OFFSET * slideT);
-
-		int x2 = x + textW + pad * 2;
-		int y2 = y + textH + pad * 2;
-
+		int x     = baseX + (int)(-SLIDE_OFFSET * slideT);
+		int x2    = x + textW + pad * 2;
+		int y2    = y + textH + pad * 2;
 		int textY = y + pad + 1;
 
 		graphics.fill(x, y, x2, y2, bg);
-
-		graphics.fill(x,  y,    x2, y + 1, border);
-		graphics.fill(x,  y2-1, x2, y2, border);
-		graphics.fill(x,  y,    x + 1, y2, border);
-		graphics.fill(x2-1, y,  x2, y2, border);
-
+		graphics.fill(x,    y,    x2,   y + 1,  border);
+		graphics.fill(x,    y2-1, x2,   y2,     border);
+		graphics.fill(x,    y,    x + 1, y2,    border);
+		graphics.fill(x2-1, y,    x2,   y2,     border);
 		graphics.text(
 				mc.font,
 				Component.literal(nowPlayingHudText).withStyle(s -> s.withBold(true)),
-				x + pad,
-				textY,
-				textColor,
-				true
+				x + pad, textY, textColor, true
 		);
+	}
+
+	private static void renderSmallHud(GuiGraphicsExtractor graphics, Minecraft mc) {
+		long  remaining  = smallToastUntilMs - Util.getMillis();
+		float alphaFactor = remaining < FADE_MS ? Math.max(0f, (float) remaining / FADE_MS) : 1f;
+		alphaFactor = alphaFactor * alphaFactor;
+		int alpha     = (int)(alphaFactor * 255f);
+		int textColor = (alpha << 24) | 0xFFFFFF;
+
+		Component text  = Component.literal(smallToastText);
+		int textW  = mc.font.width(text);
+		int textH  = mc.font.lineHeight;
+		int screenW = mc.getWindow().getGuiScaledWidth();
+		int screenH = mc.getWindow().getGuiScaledHeight();
+		int x = (screenW - textW) / 2;
+		int y = screenH - 49 - textH;
+		graphics.text(mc.font, text, x, y, textColor, true);
 	}
 
 
@@ -362,6 +463,7 @@ public class MusicShuffleClient implements ClientModInitializer {
 			}
 		}
 	}
+
 
 	private static File blacklistFile;
 
